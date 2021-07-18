@@ -1,0 +1,179 @@
+package com.sds.pjt.common.util;
+
+import com.sds.lego.adminservice.common.exception.EnumLegoException;
+import com.sds.lego.adminservice.common.exception.LegoException;
+import org.apache.commons.io.FileUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
+import java.nio.channels.CompletionHandler;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static java.nio.file.StandardOpenOption.*;
+
+public class LEGOFileUtil {
+
+    static final Logger L = LoggerFactory.getLogger(LEGOFileUtil.class);
+
+    private LEGOFileUtil() {
+        throw new IllegalStateException("Utility class");
+    }
+
+    public static void writeFile(final MultipartFile multipartFile, final String path, final String fileName) throws IOException {
+        writeFile(multipartFile.getBytes(), path, fileName);
+    }
+
+    public static void writeFile(final byte[] bytes, final String path, final String fileName) throws IOException {
+        /**
+         * SonarCube에서 아래의 내용을 결함으로 잡으면 예외처리 부탁합니다.
+         * 저장시에 보안 체크를 하므로 아래의 내용은 오탐입니다.
+         * (파일명은 다음과 같이 암호화 됩니다. - cf3efbeb964041fb9961aebd2c4b6ca0)
+         * reads a file whose location might be specified by user input
+         */
+        File file = FileUtils.getFile(path + "/" + fileName);
+        Files.createDirectories(file.toPath().getParent());
+        if(!file.exists()){
+            Files.createFile(file.toPath());
+        }
+        AsynchronousFileChannel channel = AsynchronousFileChannel.open(file.toPath(), CREATE, WRITE);
+
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+
+        Attachment attachment = new Attachment();
+        attachment.path = file.toPath();
+        attachment.fileChannel = channel;
+
+        CompletionHandler<Integer, Attachment> completionHandler = new CompletionHandler<Integer, Attachment>() {
+
+            @Override
+            public void completed(Integer result, Attachment attachment) {
+
+                L.info("{} : {}  bytes written : {}", attachment.path.getFileName(), result, Thread.currentThread().getName());
+                try {
+                    attachment.fileChannel.close();
+                } catch (IOException e) {
+                    L.error("FileUtil error : {}",e);
+                }
+            }
+
+            @Override
+            public void failed(Throwable exc, Attachment attachment) {
+                try {
+                    attachment.fileChannel.close();
+                } catch (IOException e) {
+                    L.error("FileUtil error : {}",e);
+                }
+            }
+
+        };
+
+        channel.write(buffer, 0, attachment, completionHandler);
+
+    }
+
+    public static void deleteTempFiles(String dir) {
+        /**
+         * SonarCube에서 아래의 내용을 결함으로 잡으면 예외처리 부탁합니다.
+         * 저장시에 보안 체크를 하므로 아래의 내용은 오탐입니다.
+         * (파일명은 다음과 같이 암호화 됩니다. - cf3efbeb964041fb9961aebd2c4b6ca0)
+         * reads a file whose location might be specified by user input
+         */
+        File file = FileUtils.getFile(dir);
+        try(Stream<Path> stream = Files.list(file.toPath())){
+            List<Path> paths = stream.collect(Collectors.toList());
+            for (Path resultPath : paths) {
+                Files.delete(resultPath);
+            }
+            Files.delete(file.toPath());
+        }catch (IOException e){
+            L.error("FileUtil deleteTempFiles occurred exception : {}", e);
+        }
+
+    }
+
+    public static void deleteFile(String dir, String fileName) {
+        try{
+            File file = FileUtils.getFile(dir, fileName);
+            Files.delete(file.toPath());
+        }catch (IOException e){
+            L.error("FileUtil deleteFile occurred exception : {}", e);
+        }
+
+    }
+
+    public static boolean checkExistYn(String path, String fileName) {
+        File file = FileUtils.getFile(path + "/" + fileName);
+        return file.exists();
+    }
+
+    public static void copyFile(String source, String dest) throws IOException {
+        try (FileInputStream fis = new FileInputStream(FileUtils.getFile(source));
+            FileOutputStream fos = new FileOutputStream(FileUtils.getFile(dest));
+        ) {
+
+            byte[] buf = new byte[1024];
+            int read;
+            while ((read = fis.read(buf)) != -1) {
+                fos.write(buf, 0, read);
+            }
+        }
+
+
+    }
+
+    public static void validChunk(String fileDir, long totalChunkCount, long totalFileSize) {
+
+        long fileSize = 0;
+        File file;
+
+        try{
+            for(int i = 0 ; i < totalChunkCount ; i++) {
+                file = FileUtils.getFile(fileDir, String.valueOf(i));
+                try(FileChannel fileChannel = FileChannel.open(file.toPath())){
+                    fileSize += fileChannel.size();
+                }
+            }
+        }catch(Exception e){
+            L.error("FileUtil occurred exception : {}",e);
+            throw new LegoException(EnumLegoException.FILE103);
+        }
+        if(totalFileSize != fileSize){
+            throw new LegoException(EnumLegoException.FILE103);
+        }
+    }
+
+    public static void mergeChunk(String tmpPath, String targetPath, String uuid, long totalChunkCount) {
+
+        try {
+
+            Files.createDirectories(FileUtils.getFile(targetPath).toPath());
+            Path outFile=FileUtils.getFile(targetPath, uuid).toPath();
+
+            try (FileChannel out = FileChannel.open(outFile, CREATE, WRITE)) {
+                for (int i = 0; i < totalChunkCount; i++) {
+                    Path inFile = FileUtils.getFile(tmpPath, String.valueOf(i)).toPath();
+                    try (FileChannel in = FileChannel.open(inFile, READ)) {
+                        for (long p = 0, l = in.size(); p < l; )
+                            p += in.transferTo(p, l - p, out);
+                    }
+                }
+            }
+        }catch (Exception e){
+            L.error("FileUtil occurred exception : {}",e);
+        }
+
+    }
+
+}
