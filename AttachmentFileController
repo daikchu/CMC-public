@@ -1,0 +1,163 @@
+package com.sds.pjt.file.rest;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.util.List;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import org.apache.commons.compress.utils.IOUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+import com.sds.lego.adminservice.common.consts.LegoConst;
+import com.sds.lego.adminservice.common.util.HttpUtil;
+import com.sds.pjt.file.app.AttachmentFileService;
+import com.sds.pjt.file.entity.AttachmentChunkVO;
+import com.sds.pjt.file.entity.AttachmentFileVO;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiParam;
+
+@RestController
+@RequestMapping(LegoConst.REST_URL_V2 + LegoConst.DSI_REST_URL_V1 + "/attachment-file")
+@Api(value = "rest/v2/attachment-file", consumes = "application/json")
+public class AttachmentFileController {
+  final Logger logger = LoggerFactory.getLogger(this.getClass());
+
+  private static final String R_SPACE = "\\ ";
+  private static final String R_PLUS = "\\+";
+  private static final String UTF_8 = "UTF-8";
+
+  @Autowired
+  AttachmentFileService attachmentFileService;
+
+  @ApiOperation(httpMethod = "GET", value = "Download Attached File", produces = "application/json", consumes = "application/json")
+  @GetMapping(value = "/attached-file-download")
+  public ResponseEntity<Boolean> attachedFileDownload(@RequestParam List<String> fileIdList,
+      HttpServletRequest request, HttpServletResponse response) {
+    File file = attachmentFileService.downloadAttachedFile(fileIdList);
+
+    try {
+      response.setContentType("application/zip");
+      response.setHeader("Content-disposition", "attachment; filename="
+          + this.encodeFilename(request, file.getName()) + ";fileSize=" + file.length());
+
+      OutputStream out = response.getOutputStream();
+      FileInputStream in = new FileInputStream(file);
+
+      IOUtils.copy(in, out);
+
+      out.close();
+      in.close();
+
+    } catch (Exception e) {
+      logger.error(e.getMessage());
+      e.printStackTrace();
+    }
+    return ResponseEntity.ok().build();
+  }
+
+  private String encodeFilename(HttpServletRequest request, String fileName) throws UnsupportedEncodingException {
+    String userAgent = request.getHeader("User-Agent");
+
+    if (userAgent.contains("MSIE 5.5")) { // MS IE under v5.5
+      return URLEncoder.encode(fileName, UTF_8).replace(R_PLUS, R_SPACE);
+    } else if (userAgent.contains("MSIE")) { // MS IE upper v5.6
+      return URLEncoder.encode(fileName, UTF_8).replace(R_PLUS, R_SPACE);
+    } else if (userAgent.contains("Trident")) { // MS IE 11
+      return URLEncoder.encode(fileName, UTF_8).replace(R_PLUS, R_SPACE);
+    } else { // Mozila or Opera
+      return URLEncoder.encode(fileName, UTF_8).replace(R_PLUS, R_SPACE);
+    }
+  }
+
+  @ApiOperation(httpMethod = "POST", value = "Upload split chunk file", produces = "application/json", consumes = "application/json")
+  @PostMapping(value = "/upload/chunk")
+  public ResponseEntity<Object> chunkUpload(@RequestParam("dzuuid") String uuid,
+      @RequestParam("dzchunkindex") long chunkIndex,
+      @RequestParam("dztotalfilesize") long totalFileSize,
+      @RequestParam("dzchunksize") long chunkSize,
+      @RequestParam("dztotalchunkcount") long totalChunkCount,
+      @RequestParam("dzchunkbyteoffset") long chunkByteOffset,
+      @RequestParam("file") MultipartFile file, HttpServletRequest request) {
+
+    AttachmentChunkVO chunkVO = new AttachmentChunkVO();
+
+    chunkVO.setUuid(uuid);
+    chunkVO.setChunkIndex(chunkIndex);
+    chunkVO.setTotalFileSize(totalFileSize);
+    chunkVO.setChunkSize(chunkSize);
+    chunkVO.setTotalChunkCount(totalChunkCount);
+    chunkVO.setChunkByteOffset(chunkByteOffset);
+    chunkVO.setFile(file);
+
+    if (attachmentFileService.storeChunk(chunkVO)) {
+      return ResponseEntity.ok().build();
+    } else {
+      return ResponseEntity.status(500).build();
+    }
+
+  }
+
+  @ApiOperation(httpMethod = "POST", value = "Commit chunk upload", produces = "application/json", consumes = "application/json")
+  @PostMapping(value = "/upload/chunk/commit")
+  public ResponseEntity<Object> chunkUploadCommit(HttpServletRequest request,
+      @RequestBody AttachmentChunkVO chunkVO) {
+    chunkVO.setUserIp(HttpUtil.getRemoteIP(request));
+    if (attachmentFileService.mergeChunk(chunkVO)) {
+      attachmentFileService.saveUploadFileHistory(chunkVO);
+      return ResponseEntity.ok().build();
+    } else {
+      return ResponseEntity.status(500).build();
+    }
+
+  }
+
+  @ApiOperation(httpMethod = "DELETE", value = "Delete file", produces = "application/json", consumes = "application/json")
+  @DeleteMapping(value = "/delete/file/{fileId}")
+  public ResponseEntity<Object> deleteFile(
+      @ApiParam(value = "fileId", required = true) @PathVariable("fileId") String fileId,
+      HttpServletRequest request) {
+    AttachmentFileVO fileVO = attachmentFileService.queryByFileId(fileId);
+    attachmentFileService.deleteFile(fileVO);
+    attachmentFileService.saveFileHistory(fileVO, HttpUtil.getRemoteIP(request), "DELETE");
+    return ResponseEntity.ok().build();
+  }
+
+  @ApiOperation(httpMethod = "GET", value = "Query files in the group", produces = "application/json", consumes = "application/json")
+  @GetMapping(value = "/list/{groupId}")
+  public ResponseEntity<List<AttachmentFileVO>> fileList(@ApiParam(value = "groupId", required = true) @PathVariable("groupId") String groupId){
+      return ResponseEntity.ok(attachmentFileService.queryByFileGroupId(groupId));
+  }
+  
+  @ApiOperation(httpMethod = "PUT", value = "Update File Category", produces = "application/json", consumes = "application/json")
+  @PutMapping(value = "/update/category")
+  public ResponseEntity<Object> updateFileCategory(@RequestBody AttachmentFileVO attachmentFileVO){
+      logger.debug("[PUT] /rest/v2/attachment-file/update/category : Update File Category");
+      attachmentFileService.updateFileCategory(attachmentFileVO);
+      return ResponseEntity.ok().build();
+  }
+  
+  @ApiOperation(httpMethod = "PUT", value = "Update File Order", produces = "application/json", consumes = "application/json")
+  @PutMapping(value = "/update/order")
+  public ResponseEntity<Object> updateFilesOrder(@RequestBody List<String> listFileId){
+      logger.debug("[PUT] /rest/v2/attachment-file/update/order : Update Files Order");
+      attachmentFileService.updateFilesOrder(listFileId);
+      return ResponseEntity.ok().build();
+  }
+  
+}
